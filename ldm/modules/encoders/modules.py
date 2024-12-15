@@ -178,18 +178,33 @@ class FrozenCLIPTextEmbedder(nn.Module):
         self.model = self.model.eval()
         for param in self.parameters():
             param.requires_grad = False
-
     def forward(self, text):
+        # 使用CLIP的tokenize方法将输入文本转换为token序列
+        # 并将token张量移动到指定设备(GPU/CPU)上
         tokens = clip.tokenize(text).to(self.device)
+
+        # 使用CLIP模型的encode_text方法将token序列编码为文本特征向量
         z = self.model.encode_text(tokens)
+
+        # 如果normalize为True,对特征向量进行L2归一化
+        # 通过除以向量的L2范数(欧几里得范数)实现
+        # keepdim=True保持维度不变
         if self.normalize:
             z = z / torch.linalg.norm(z, dim=1, keepdim=True)
         return z
 
     def encode(self, text):
+        # 调用forward方法获取文本特征向量
         z = self(text)
+
+        # 如果特征向量是2维的(batch_size, dim)
+        # 在中间插入一个维度变成(batch_size, 1, dim)
         if z.ndim==2:
             z = z[:, None, :]
+
+        # 将特征向量在第二个维度上重复n_repeat次
+        # 输入形状: (batch_size, 1, dim)
+        # 输出形状: (batch_size, n_repeat, dim)
         z = repeat(z, 'b 1 d -> b k d', k=self.n_repeat)
         return z
 

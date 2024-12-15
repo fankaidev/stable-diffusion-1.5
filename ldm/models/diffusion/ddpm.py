@@ -422,6 +422,8 @@ class DDPM(pl.LightningModule):
         return opt
 
 
+# 这个就是 LDM 类型的模型
+# 继承了 DDPM 自身以及内部的 unet 模型，还维护了 VAE (first_stage_model) 和 CLIP (cond_stage_model)
 class LatentDiffusion(DDPM):
     """main class"""
     def __init__(self,
@@ -462,7 +464,7 @@ class LatentDiffusion(DDPM):
         self.instantiate_cond_stage(cond_stage_config)
         self.cond_stage_forward = cond_stage_forward
         self.clip_denoised = False
-        self.bbox_tokenizer = None  
+        self.bbox_tokenizer = None
 
         self.restarted_from_ckpt = False
         if ckpt_path is not None:
@@ -500,7 +502,19 @@ class LatentDiffusion(DDPM):
         if self.shorten_cond_schedule:
             self.make_cond_schedule()
 
+
     def instantiate_first_stage(self, config):
+        """实例化第一阶段模型
+
+        该方法用于初始化和配置第一阶段的自编码器模型。具体步骤:
+        1. 从配置创建模型实例
+        2. 将模型设置为评估模式
+        3. 禁用训练功能
+        4. 冻结所有参数
+
+        Args:
+            config: 模型配置信息
+        """
         model = instantiate_from_config(config)
         self.first_stage_model = model.eval()
         self.first_stage_model.train = disabled_train
@@ -508,6 +522,22 @@ class LatentDiffusion(DDPM):
             param.requires_grad = False
 
     def instantiate_cond_stage(self, config):
+        """实例化条件阶段模型
+
+        该方法用于初始化和配置条件模型。根据配置和可训练性有不同处理:
+
+        当条件模型不可训练时(self.cond_stage_trainable=False):
+        1. 如果config为"__is_first_stage__",使用第一阶段模型作为条件模型
+        2. 如果config为"__is_unconditional__",设置为无条件模型
+        3. 其他情况下,从配置创建新模型并冻结参数
+
+        当条件模型可训练时:
+        1. 确保config不是特殊值
+        2. 从配置创建可训练的模型实例
+
+        Args:
+            config: 条件模型的配置信息或特殊标识符
+        """
         if not self.cond_stage_trainable:
             if config == "__is_first_stage__":
                 print("Using first stage also as cond stage.")
@@ -550,6 +580,25 @@ class LatentDiffusion(DDPM):
         return self.scale_factor * z
 
     def get_learned_conditioning(self, c):
+        """获取学习到的条件嵌入向量
+
+        该方法用于将输入的条件(如文本提示)转换为条件嵌入向量。处理流程如下:
+
+        1. 如果没有指定条件阶段的前向函数名(self.cond_stage_forward为None):
+           - 优先使用条件模型的encode方法(如果存在且可调用)
+           - 如果encode方法返回对角高斯分布,则取其众数
+           - 如果没有encode方法,则直接调用条件模型进行编码
+
+        2. 如果指定了条件阶段的前向函数名:
+           - 验证条件模型是否具有指定的方法
+           - 使用getattr动态调用指定的方法进行编码
+
+        Args:
+            c: 输入的条件,通常是文本提示
+
+        Returns:
+            条件嵌入向量,用于引导扩散模型的生成过程
+        """
         if self.cond_stage_forward is None:
             if hasattr(self.cond_stage_model, 'encode') and callable(self.cond_stage_model.encode):
                 c = self.cond_stage_model.encode(c)
@@ -794,7 +843,7 @@ class LatentDiffusion(DDPM):
                 z = z.view((z.shape[0], -1, ks[0], ks[1], z.shape[-1]))  # (bn, nc, ks[0], ks[1], L )
 
                 # 2. apply model loop over last dim
-                if isinstance(self.first_stage_model, VQModelInterface):  
+                if isinstance(self.first_stage_model, VQModelInterface):
                     output_list = [self.first_stage_model.decode(z[:, :, :, :, i],
                                                                  force_not_quantize=predict_cids or force_not_quantize)
                                    for i in range(z.shape[-1])]
@@ -901,8 +950,11 @@ class LatentDiffusion(DDPM):
             cond = {key: cond}
 
         if hasattr(self, "split_input_params"):
+            # 如果模型有split_input_params参数,说明需要对输入进行分块处理
+            # 这种情况通常用于处理大尺寸图像,将其分成多个小块分别处理,然后再拼接回去
+            # 目前只支持处理单个条件(cond),且不支持返回ids
             assert len(cond) == 1  # todo can only deal with one conditioning atm
-            assert not return_ids  
+            assert not return_ids
             ks = self.split_input_params["ks"]  # eg. (128, 128)
             stride = self.split_input_params["stride"]  # eg. (64, 64)
 
@@ -985,6 +1037,8 @@ class LatentDiffusion(DDPM):
             x_recon = fold(o) / normalization
 
         else:
+            # 如果模型没有split_input_params参数,说明不需要对输入进行分块处理
+            # 直接将输入和条件输入到模型中
             x_recon = self.model(x_noisy, t, **cond)
 
         if isinstance(x_recon, tuple) and not return_ids:
@@ -1415,8 +1469,23 @@ class LatentDiffusion(DDPM):
 class DiffusionWrapper(pl.LightningModule):
     def __init__(self, diff_model_config, conditioning_key):
         super().__init__()
+        # 从配置文件中实例化扩散模型
+        # 参数:
+        #   diff_model_config: 包含扩散模型配置的字典,通常包含以下内容:
+        #     - target: 目标模型类的路径字符串,如 'ldm.modules.diffusionmodules.openaimodel.UNetModel'
+        #     - params: 模型初始化参数,如 image_size, in_channels, model_channels 等
+        # 返回:
+        #   实例化后的扩散模型对象,通常是一个 UNet 模型
         self.diffusion_model = instantiate_from_config(diff_model_config)
+
         self.conditioning_key = conditioning_key
+        # 记录条件类型,用于控制扩散模型的条件输入方式
+        # conditioning_key 可以是以下几种:
+        # - None: 无条件生成
+        # - concat: 将条件直接与输入拼接
+        # - crossattn: 使用交叉注意力机制处理条件
+        # - hybrid: 同时使用拼接和交叉注意力
+        # - adm: ADM风格的条件处理
         assert self.conditioning_key in [None, 'concat', 'crossattn', 'hybrid', 'adm']
 
     def forward(self, x, t, c_concat: list = None, c_crossattn: list = None):

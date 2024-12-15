@@ -283,36 +283,50 @@ class VQModelInterface(VQModel):
 
 
 class AutoencoderKL(pl.LightningModule):
+    """
+    自动编码器KL模型,用于图像压缩和重建
+    """
     def __init__(self,
-                 ddconfig,
-                 lossconfig,
-                 embed_dim,
-                 ckpt_path=None,
-                 ignore_keys=[],
-                 image_key="image",
-                 colorize_nlabels=None,
-                 monitor=None,
+                 ddconfig,  # 编码器和解码器的配置参数
+                 lossconfig,  # 损失函数的配置参数
+                 embed_dim,  # 嵌入维度
+                 ckpt_path=None,  # 预训练模型路径
+                 ignore_keys=[],  # 加载预训练模型时需要忽略的键
+                 image_key="image",  # 输入图像在batch中的键名
+                 colorize_nlabels=None,  # 用于分割图像上色的标签数量
+                 monitor=None,  # 监控指标
                  ):
         super().__init__()
         self.image_key = image_key
+        # 初始化编码器和解码器
         self.encoder = Encoder(**ddconfig)
         self.decoder = Decoder(**ddconfig)
+        # 初始化损失函数
         self.loss = instantiate_from_config(lossconfig)
+        # 确保使用双重潜在编码
         assert ddconfig["double_z"]
+        # 量化卷积层,将编码器输出压缩到潜在空间
         self.quant_conv = torch.nn.Conv2d(2*ddconfig["z_channels"], 2*embed_dim, 1)
+        # 反量化卷积层,将潜在表示转换回解码器所需的通道数
         self.post_quant_conv = torch.nn.Conv2d(embed_dim, ddconfig["z_channels"], 1)
         self.embed_dim = embed_dim
+        # 如果需要对分割图像上色,则注册一个随机颜色映射
         if colorize_nlabels is not None:
             assert type(colorize_nlabels)==int
             self.register_buffer("colorize", torch.randn(3, colorize_nlabels, 1, 1))
         if monitor is not None:
             self.monitor = monitor
+        # 如果提供了预训练模型路径,则加载预训练权重
         if ckpt_path is not None:
             self.init_from_ckpt(ckpt_path, ignore_keys=ignore_keys)
 
     def init_from_ckpt(self, path, ignore_keys=list()):
+        """
+        从预训练检查点加载模型权重
+        """
         sd = torch.load(path, map_location="cpu")["state_dict"]
         keys = list(sd.keys())
+        # 删除需要忽略的键
         for k in keys:
             for ik in ignore_keys:
                 if k.startswith(ik):
@@ -322,17 +336,30 @@ class AutoencoderKL(pl.LightningModule):
         print(f"Restored from {path}")
 
     def encode(self, x):
+        """
+        将输入图像编码为潜在表示
+        返回一个对角高斯分布
+        """
         h = self.encoder(x)
         moments = self.quant_conv(h)
         posterior = DiagonalGaussianDistribution(moments)
         return posterior
 
     def decode(self, z):
+        """
+        将潜在表示解码为图像
+        """
         z = self.post_quant_conv(z)
         dec = self.decoder(z)
         return dec
 
     def forward(self, input, sample_posterior=True):
+        """
+        模型的前向传播
+        input: 输入图像
+        sample_posterior: 是否从后验分布采样
+        返回: (重建图像, 后验分布)
+        """
         posterior = self.encode(input)
         if sample_posterior:
             z = posterior.sample()
@@ -342,6 +369,10 @@ class AutoencoderKL(pl.LightningModule):
         return dec, posterior
 
     def get_input(self, batch, k):
+        """
+        从batch中获取输入图像并进行预处理
+        将图像转换为BCHW格式
+        """
         x = batch[k]
         if len(x.shape) == 3:
             x = x[..., None]

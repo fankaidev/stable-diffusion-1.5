@@ -178,6 +178,9 @@ def main():
         default=8,
         help="downsampling factor",
     )
+    # n_iter: 每个prompt生成几轮图片, 串行执行，不会增加显存占用
+    # n_samples: 每轮生成几张图片, 并行执行，会增加显存占用
+    # 例如 n_iter=2, n_samples=3 会生成 2*3=6 张图片
     parser.add_argument(
         "--n_samples",
         type=int,
@@ -275,23 +278,49 @@ def main():
 
     start_code = None
     if opt.fixed_code:
+        # 如果启用了固定代码选项:
+        # - 生成一个固定的随机噪声作为起始点
+        # - 这个噪声张量的形状为[n_samples, C, H/f, W/f]
+        # - n_samples: 每次生成的样本数量
+        # - C: 通道数
+        # - H/f: 高度除以下采样因子f
+        # - W/f: 宽度除以下采样因子f
+        # - 这样可以让每次生成时使用相同的起始噪声,保证结果的一致性
+        # - 噪声张量被放在指定的设备(GPU/CPU)上
         start_code = torch.randn([opt.n_samples, opt.C, opt.H // opt.f, opt.W // opt.f], device=device)
 
     precision_scope = autocast if opt.precision=="autocast" else nullcontext
     with torch.no_grad():
+        # 根据precision参数设置CUDA计算精度:
+        # - 当precision="autocast"时使用自动混合精度(AMP)训练，可以减少显存占用并提升训练速度
+        # - 当precision="fp32"时使用32位浮点数计算，精度最高但显存占用大
+        # - 当precision="fp16"时使用16位浮点数计算，可以显著减少显存占用，但可能损失精度
+        # - 当precision="bf16"时使用bfloat16格式计算，相比fp16具有更大的动态范围
         with precision_scope("cuda"):
+            # 使用模型的EMA(指数移动平均)权重进行推理
+            # EMA可以让模型预测更稳定,生成质量更好
             with model.ema_scope():
                 tic = time.time()
                 all_samples = list()
+                # n_iter controls how many times to run the sampling loop
+                # Higher values will generate more images per prompt
                 for n in trange(opt.n_iter, desc="Sampling"):
                     for prompts in tqdm(data, desc="data"):
                         uc = None
                         if opt.scale != 1.0:
+                            # 如果scale不为1.0，则使用空文本条件进行条件编码
+                            # 空文本条件用于生成无条件图像
                             uc = model.get_learned_conditioning(batch_size * [""])
                         if isinstance(prompts, tuple):
                             prompts = list(prompts)
+                        # 获取文本条件嵌入向量
+                        # c代表文本条件，用于引导扩散模型生成与文本描述相匹配的图像
+                        # 模型会根据这个条件向量来控制生成过程，确保生成的图像符合输入的文本提示
                         c = model.get_learned_conditioning(prompts)
+                        # 设置生成图像的尺寸
                         shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
+                        print(f"shape: {shape}")
+                        # 使用DDIM采样器生成图像
                         samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
                                                          conditioning=c,
                                                          batch_size=opt.n_samples,
@@ -302,8 +331,16 @@ def main():
                                                          eta=opt.ddim_eta,
                                                          x_T=start_code)
 
+                        # 将DDIM采样器生成的潜空间样本解码为图像
+                        # samples_ddim是在潜空间中的样本表示
+                        # 通过VAE解码器(decode_first_stage)将其转换为RGB图像
+                        # 解码后的图像范围从[-1,1]归一化到[0,1]
+                        # 最后将图像数据从PyTorch张量转换为NumPy数组,并调整通道顺序
+                        # 为后续的安全检查和保存做准备
                         x_samples_ddim = model.decode_first_stage(samples_ddim)
+                        # 将解码后的图像数据从[-1,1]归一化到[0,1]
                         x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
+                        # 将图像数据从PyTorch张量转换为NumPy数组,并调整通道顺序
                         x_samples_ddim = x_samples_ddim.cpu().permute(0, 2, 3, 1).numpy()
 
                         x_checked_image, has_nsfw_concept = check_safety(x_samples_ddim)
@@ -318,7 +355,13 @@ def main():
                                 img.save(os.path.join(sample_path, f"{base_count:05}.png"))
                                 base_count += 1
 
+
                         if not opt.skip_grid:
+                            # 将当前批次的检查过的图像张量添加到all_samples列表中
+                            # all_samples用于后续生成图像网格
+                            # x_checked_image_torch的形状为[batch_size, channels, height, width]
+                            # 其中包含了经过安全检查、格式转换后的图像数据
+                            # 这些图像将被用于创建一个包含多个生成结果的网格展示图
                             all_samples.append(x_checked_image_torch)
 
                 if not opt.skip_grid:

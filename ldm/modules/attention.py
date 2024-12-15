@@ -89,7 +89,7 @@ class LinearAttention(nn.Module):
         b, c, h, w = x.shape
         qkv = self.to_qkv(x)
         q, k, v = rearrange(qkv, 'b (qkv heads c) h w -> qkv b heads c (h w)', heads = self.heads, qkv=3)
-        k = k.softmax(dim=-1)  
+        k = k.softmax(dim=-1)
         context = torch.einsum('bhdn,bhen->bhde', k, v)
         out = torch.einsum('bhde,bhdn->bhen', context, q)
         out = rearrange(out, 'b heads c (h w) -> b (heads c) h w', heads=self.heads, h=h, w=w)
@@ -168,28 +168,45 @@ class CrossAttention(nn.Module):
         )
 
     def forward(self, x, context=None, mask=None):
+        # 获取注意力头数
         h = self.heads
 
+        # 生成查询向量Q
         q = self.to_q(x)
+        # 如果没有提供context,则使用输入x作为context
         context = default(context, x)
+        # 生成键向量K和值向量V
         k = self.to_k(context)
         v = self.to_v(context)
 
+        # 重排Q、K、V的形状,将每个注意力头的维度分开
+        # 从 [batch, seq_len, heads*dim] 转换为 [batch*heads, seq_len, dim]
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
 
+        # 计算注意力分数 (Q和K的点积)
+        # 使用einsum进行批量矩阵乘法,得到相似度矩阵
         sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
 
+        # 如果提供了mask,进行mask处理
         if exists(mask):
+            # 重排mask的形状
             mask = rearrange(mask, 'b ... -> b (...)')
+            # 获取当前数据类型下的最小值
             max_neg_value = -torch.finfo(sim.dtype).max
+            # 扩展mask以匹配注意力头的数量
             mask = repeat(mask, 'b j -> (b h) () j', h=h)
+            # 将mask位置填充为极小值
             sim.masked_fill_(~mask, max_neg_value)
 
-        # attention, what we cannot get enough of
+        # 对相似度矩阵进行softmax,得到注意力权重
         attn = sim.softmax(dim=-1)
 
+        # 将注意力权重与V相乘,得到输出
         out = einsum('b i j, b j d -> b i d', attn, v)
+        # 重排输出形状,合并多头的结果
+        # 从 [batch*heads, seq_len, dim] 转换回 [batch, seq_len, heads*dim]
         out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
+        # 通过输出投影层和dropout
         return self.to_out(out)
 
 

@@ -290,37 +290,56 @@ class AttentionBlock(nn.Module):
         use_checkpoint=False,
         use_new_attention_order=False,
     ):
+        """
+        初始化注意力模块
+        :param channels: 输入通道数
+        :param num_heads: 注意力头数,默认为1
+        :param num_head_channels: 每个注意力头的通道数,默认为-1表示由num_heads决定
+        :param use_checkpoint: 是否使用梯度检查点,用于节省显存
+        :param use_new_attention_order: 是否使用新的注意力计算顺序
+        """
         super().__init__()
         self.channels = channels
         if num_head_channels == -1:
+            # 如果没有指定每个头的通道数,则直接使用指定的头数
             self.num_heads = num_heads
         else:
+            # 如果指定了每个头的通道数,则头数由总通道数除以每个头的通道数决定
             assert (
                 channels % num_head_channels == 0
             ), f"q,k,v channels {channels} is not divisible by num_head_channels {num_head_channels}"
             self.num_heads = channels // num_head_channels
         self.use_checkpoint = use_checkpoint
+        # 对输入进行归一化
         self.norm = normalization(channels)
+        # 1x1卷积生成q,k,v三个向量,所以输出通道数是输入通道数的3倍
         self.qkv = conv_nd(1, channels, channels * 3, 1)
         if use_new_attention_order:
-            # split qkv before split heads
+            # 新的注意力计算顺序:先分离qkv,再分离多头
             self.attention = QKVAttention(self.num_heads)
         else:
-            # split heads before split qkv
+            # 传统注意力计算顺序:先分离多头,再分离qkv
             self.attention = QKVAttentionLegacy(self.num_heads)
 
+        # 输出投影层,初始化为0以便残差连接
         self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
 
     def forward(self, x):
+        # 使用梯度检查点包装_forward函数,节省显存
         return checkpoint(self._forward, (x,), self.parameters(), True)   # TODO: check checkpoint usage, is True # TODO: fix the .half call!!!
         #return pt_checkpoint(self._forward, x)  # pytorch
 
     def _forward(self, x):
+        # 获取输入张量的形状
         b, c, *spatial = x.shape
+        # 将空间维度展平
         x = x.reshape(b, c, -1)
+        # 生成q,k,v向量并进行注意力计算
         qkv = self.qkv(self.norm(x))
         h = self.attention(qkv)
+        # 通过输出投影层
         h = self.proj_out(h)
+        # 残差连接并恢复原始形状
         return (x + h).reshape(b, c, *spatial)
 
 
@@ -719,27 +738,43 @@ class UNetModel(nn.Module):
         assert (y is not None) == (
             self.num_classes is not None
         ), "must specify y if and only if the model is class-conditional"
+        # 存储每个下采样层的特征图,用于后续的跳跃连接
         hs = []
+
+        # 时间步编码: 将时间步转换为向量表示
         t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
+        # 通过MLP网络进一步处理时间编码
         emb = self.time_embed(t_emb)
 
+        # 如果是条件生成,则添加类别标签的编码
         if self.num_classes is not None:
-            assert y.shape == (x.shape[0],)
-            emb = emb + self.label_emb(y)
+            assert y.shape == (x.shape[0],)  # 确保标签数量与batch size一致
+            emb = emb + self.label_emb(y)  # 将标签编码加到时间编码上
 
+        # 将输入转换为指定的数据类型(float16或float32)
         h = x.type(self.dtype)
+
+        # 下采样阶段:通过输入块处理
         for module in self.input_blocks:
-            h = module(h, emb, context)
-            hs.append(h)
+            h = module(h, emb, context)  # 每个模块接收特征、时间编码和上下文
+            hs.append(h)  # 保存特征用于跳跃连接
+
+        # 中间处理阶段
         h = self.middle_block(h, emb, context)
+
+        # 上采样阶段:通过输出块处理
         for module in self.output_blocks:
-            h = th.cat([h, hs.pop()], dim=1)
+            h = th.cat([h, hs.pop()], dim=1)  # 拼接跳跃连接的特征
             h = module(h, emb, context)
+
+        # 将输出转回输入的数据类型
         h = h.type(x.dtype)
+
+        # 根据模型类型返回不同的输出
         if self.predict_codebook_ids:
-            return self.id_predictor(h)
+            return self.id_predictor(h)  # 预测codebook的索引
         else:
-            return self.out(h)
+            return self.out(h)  # 通过输出层得到最终结果
 
 
 class EncoderUNetModel(nn.Module):
