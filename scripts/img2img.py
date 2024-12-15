@@ -256,6 +256,15 @@ def main():
                         c = model.get_learned_conditioning(prompts)
 
                         # encode (scaled latent)
+                        # 在这里,我们将初始图像编码到潜空间,并添加噪声进行随机编码
+                        # t_enc 是基于用户指定的强度计算出的时间步数
+                        # 强度值越大,添加的噪声越多,最终结果与原图的差异也越大
+                        # 强度值越小,添加的噪声越少,最终结果会更接近原图
+
+                        # 使用随机编码器将初始潜在向量(init_latent)编码到指定的噪声级别(t_enc)
+                        # torch.tensor([t_enc]*batch_size) 创建一个批次大小的张量,每个元素都是t_enc
+                        # .to(device) 确保张量在正确的设备(CPU/GPU)上
+                        # stochastic_encode 函数会根据指定的时间步长对潜在向量添加相应程度的噪声
                         z_enc = sampler.stochastic_encode(init_latent, torch.tensor([t_enc]*batch_size).to(device))
                         # decode it
                         samples = sampler.decode(z_enc, c, t_enc, unconditional_guidance_scale=opt.scale,

@@ -244,6 +244,7 @@ class DDIMSampler(object):
             # e_t_uncond: 无条件预测的噪声
             # e_t: 有条件预测的噪声
             # unconditional_guidance_scale: CFG缩放因子,控制条件引导的强度
+            # 这个参数实际上是在控制"相对于无条件预测的偏离程度"，因此被命名为"unconditional_guidance_scale"。
             # 当缩放因子为1时,等同于普通的条件生成
             # 当缩放因子>1时,会加强条件的影响
             # 计算公式: e_t = e_t_uncond + scale * (e_t - e_t_uncond)
